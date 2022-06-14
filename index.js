@@ -136,7 +136,7 @@ module.exports = function(RED) {
                 // Unsuppored input
                 node.error("Null or undefined (msg.payload) input.")
             } else if (_.isString(msg.payload)) {
-                handled = action('payload string', msg.payload)
+                handled = action('payload string', msg)
             } else {
                 if (msg.payload.hasOwnProperty('suspended')) {
                     handled = true;
@@ -174,7 +174,8 @@ module.exports = function(RED) {
             }
         });
 
-        function action(source, data) {
+        function action(source, msg) {
+            const data = msg.payload
             let handled = false;
             if (data === 'on') {
                 // Sends the on event without impacting the scheduled event
@@ -214,7 +215,8 @@ module.exports = function(RED) {
                     topic: 'info',
                     info: info,
                     tag: config.tag || 'eztimer',
-                    payload: info
+                    payload: info,
+                    _linkSource: msg._linkSource,
                 });
             } else if (data === 'sync') {
                 handled = true;
