@@ -60,24 +60,26 @@ module.exports = function(RED) {
             let ha = node.context().global.get('homeassistant');
             let zones = [];
 
-            let servers = Object.keys(ha);
-            let multipleServers = servers.length > 1;
-            for (server of servers) {
-              for (element in ha[server].states) {
-                let zone = ha[server].states[element];
-                if (element.substring(0, 4) == "zone") {
-                  let z = {
-                    entity_id: zone.entity_id,
-                    name: multipleServers
-                      ? `${server}: ${zone.attributes.friendly_name}`
-                      : zone.attributes.friendly_name,
-                    latitude: zone.attributes.latitude,
-                    longitude: zone.attributes.longitude,
-                  };
-                  if (z.entity_id.substring(0, 9) == "zone.home") zones.unshift(z);
-                  else zones.push(z);
+            if (ha) {
+                let servers = Object.keys(ha);
+                let multipleServers = servers.length > 1;
+                for (server of servers) {
+                    for (element in ha[server].states) {
+                        let zone = ha[server].states[element];
+                        if (element.substring(0, 4) == "zone") {
+                            let z = {
+                                entity_id: zone.entity_id,
+                                name: multipleServers
+                                    ? `${server}: ${zone.attributes.friendly_name}`
+                                    : zone.attributes.friendly_name,
+                                latitude: zone.attributes.latitude,
+                                longitude: zone.attributes.longitude,
+                            };
+                            if (z.entity_id.substring(0, 9) == "zone.home") zones.unshift(z);
+                            else zones.push(z);
+                        }
+                    }
                 }
-              }
             }
             res.json(zones);
         });
