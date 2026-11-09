@@ -375,6 +375,29 @@ module.exports = function(RED) {
 
         node.on('close', suspend);
 
+        // Detect system clock jumps (e.g. NTP syncing after boot, VM resume, manual change) (#52).
+        // setTimeout runs on a monotonic clock, so events scheduled before a wall-clock jump would
+        // fire at the wrong wall-clock time. Compare wall-clock vs monotonic elapsed time and
+        // re-bootstrap if they diverge. Event-loop lag affects both equally, so it won't trigger this.
+        const clockCheckMs = 10000;
+        const clockJumpThresholdMs = 5000;
+        function monotonicMs() {
+            const t = process.hrtime();
+            return t[0] * 1e3 + t[1] / 1e6;
+        }
+        let clockOffset = Date.now() - monotonicMs();
+        const clockCheck = setInterval(function() {
+            const offset = Date.now() - monotonicMs();
+            const jump = offset - clockOffset;
+            clockOffset = offset;
+            if (Math.abs(jump) > clockJumpThresholdMs) {
+                if (isSuspended()) return;
+                log(2, 'System time change of ' + Math.round(jump / 1000) + 's detected, re-scheduling events.');
+                bootstrap();
+            }
+        }, clockCheckMs);
+        node.on('close', function() { clearInterval(clockCheck); });
+
         function setupEvent(eventName, shape) {
             const filtered = _.pickBy(config, function(value, key) {
                 return key && key.indexOf(eventName) === 0;
