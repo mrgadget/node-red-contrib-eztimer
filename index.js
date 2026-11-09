@@ -105,10 +105,14 @@ module.exports = function(RED) {
             resendInterval = getSeconds(config.resendInterval);
             if (resendInterval > 0) {
                 log(1, 'Re-send interval = ' + resendInterval + ' seconds.');
-                resend()
             } else {
                 log(1, 'Re-send disabled.');
             }
+        }
+
+        function startResend() {
+            clearTimeout(resendObj);
+            if (config.resend && resendInterval > 0) resend();
         }
 
         function resend() {
@@ -153,14 +157,14 @@ module.exports = function(RED) {
                     requiresBootstrap = requiresBootstrap || previous !== config.suspended;
                 }
                 if (msg.payload.hasOwnProperty('action')) {
-                    handled = action('action', msg.payload.action);
+                    handled = action('action', Object.assign({}, msg, { payload: msg.payload.action }));
                 }
                 enumerateProgrammables(function(obj, prop, payloadName, typeConverter) {
-                    if (msg.payload.hasOwnProperty(payloadName)) {
+                    if (obj && msg.payload.hasOwnProperty(payloadName)) {
                         handled = true;
                         const previous = obj[prop];
                         obj[prop] = typeConverter(msg.payload[payloadName]);
-                        requiresBootstrap = requiresBootstrap || (previous !== obj[prop] && dynamicDuration(prop, obj[prop]));
+                        requiresBootstrap = requiresBootstrap || (previous !== obj[prop] && dynamicDuration(payloadName, obj[prop]));
                     }
                 });
                 if (!handled) node.error("Invalid object (msg.payload) input.")
@@ -659,6 +663,7 @@ module.exports = function(RED) {
                 suspend();
             } else {
                 resume();
+                startResend();
 
                 // Wait 500ms for startup, then fire PREVIOUS event to ensure we're in the right state.
                 setTimeout(function() {
