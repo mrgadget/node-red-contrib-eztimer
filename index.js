@@ -47,6 +47,48 @@ module.exports = function(RED) {
         "nadir"
     ];
 
+    // Registered once at module load (not per node instance) so the editor can list HA zones
+    // before any eztimer node has been deployed (#51).
+    function getGlobalContext() {
+        let ctx = null;
+        RED.nodes.eachNode(function(cfg) {
+            if (ctx) return;
+            const n = RED.nodes.getNode(cfg.id);
+            if (n && typeof n.context === 'function') ctx = n.context().global;
+        });
+        return ctx;
+    }
+
+    RED.httpAdmin.get("/eztimer/getHaZones", RED.auth.needsPermission('serial.read'), function(req,res) {
+        const globalContext = getGlobalContext();
+        const ha = globalContext ? globalContext.get('homeassistant') : null;
+        let zones = [];
+
+        if (ha) {
+            const servers = Object.keys(ha);
+            const multipleServers = servers.length > 1;
+            for (const server of servers) {
+                if (!ha[server] || !ha[server].states) continue;
+                for (const element in ha[server].states) {
+                    const zone = ha[server].states[element];
+                    if (element.substring(0, 4) == "zone") {
+                        const z = {
+                            entity_id: zone.entity_id,
+                            name: multipleServers
+                                ? `${server}: ${zone.attributes.friendly_name}`
+                                : zone.attributes.friendly_name,
+                            latitude: zone.attributes.latitude,
+                            longitude: zone.attributes.longitude,
+                        };
+                        if (z.entity_id.substring(0, 9) == "zone.home") zones.unshift(z);
+                        else zones.push(z);
+                    }
+                }
+            }
+        }
+        res.json(zones);
+    });
+
     RED.nodes.registerType('eztimer', function(config) {
         RED.nodes.createNode(this, config);
         const node = this
@@ -55,34 +97,6 @@ module.exports = function(RED) {
         let resendInterval;
         let resendObj;
         let inputMsg = {};
-
-        RED.httpAdmin.get("/eztimer/getHaZones", RED.auth.needsPermission('serial.read'), function(req,res) {
-            let ha = node.context().global.get('homeassistant');
-            let zones = [];
-
-            if (ha) {
-                let servers = Object.keys(ha);
-                let multipleServers = servers.length > 1;
-                for (server of servers) {
-                    for (element in ha[server].states) {
-                        let zone = ha[server].states[element];
-                        if (element.substring(0, 4) == "zone") {
-                            let z = {
-                                entity_id: zone.entity_id,
-                                name: multipleServers
-                                    ? `${server}: ${zone.attributes.friendly_name}`
-                                    : zone.attributes.friendly_name,
-                                latitude: zone.attributes.latitude,
-                                longitude: zone.attributes.longitude,
-                            };
-                            if (z.entity_id.substring(0, 9) == "zone.home") zones.unshift(z);
-                            else zones.push(z);
-                        }
-                    }
-                }
-            }
-            res.json(zones);
-        });
 
         switch (config.timerType) {
             case '1':
@@ -140,6 +154,7 @@ module.exports = function(RED) {
             } else if (_.isString(msg.payload)) {
                 handled = action('payload string', msg)
             } else {
+                msg.payload = normaliseSunTimes(msg.payload);
                 if (msg.payload.hasOwnProperty('suspended')) {
                     handled = true;
                     const previous = config.suspended;
@@ -176,12 +191,32 @@ module.exports = function(RED) {
             }
         });
 
+        // Allow sun events to be set programmatically (#48): a sun event name passed as
+        // ontime/triggertime/offtime is treated as onsun/offsun, and switches the event type to
+        // 'Sun Event' unless a type is given in the same message.
+        function normaliseSunTimes(payload) {
+            const p = Object.assign({}, payload);
+            [['ontime', 'on'], ['triggertime', 'on'], ['offtime', 'off']].forEach(function([timeKey, prefix]) {
+                if (typeof p[timeKey] === 'string' && sunTimes.indexOf(p[timeKey]) !== -1) {
+                    p[prefix + 'sun'] = p[timeKey];
+                    delete p[timeKey];
+                }
+            });
+            ['on', 'off'].forEach(function(prefix) {
+                if (p.hasOwnProperty(prefix + 'sun') && !p.hasOwnProperty(prefix + 'type')) p[prefix + 'type'] = '1';
+            });
+            return p;
+        }
+
         function action(source, msg) {
             const data = msg.payload
             let handled = false;
             if (data === 'on') {
                 // Sends the on event without impacting the scheduled event
                 handled = true;
+                // A manual 'on' overrides any pending cancel
+                events.on.skip = false;
+                if (events.off) events.off.skip = false;
                 send(events.on, true);
                 if (events.off && events.off.type == '3') schedule(events.off, null, true); // If 'off' is of type duration, schedule 'off' event.
                 updateStatus();
@@ -198,15 +233,25 @@ module.exports = function(RED) {
                 handled = true;
                 send(events.on);
                 updateStatus();
-            } else if (data === 'cancel' && config.timerType == '1') {
-                // Cancels the current timer without sending the off event
+            } else if (data === 'cancel') {
                 handled = true;
                 if (!isSuspended()) {
-                    schedule(events.on);
-                    clearTimeout(events.off.timeout);
-                    state = false;
-                    events.off.moment = null;
-                    if (!isSuspended() && events.off.type != '3') schedule(events.off);
+                    if (config.timerType == '1' && state) {
+                        // Timer is on - cancel the current run without sending the off event
+                        clearTimeout(events.off.timeout);
+                        state = false;
+                        events.off.moment = null;
+                        events.off.skip = false;
+                        schedule(events.on);
+                        // Re-schedule 'off' for all types - a duration 'off' is only ever scheduled
+                        // here or by its own callback, so leaving it unscheduled stopped it firing.
+                        if (events.off.type != '9') schedule(events.off);
+                    } else if (events.on.type != '9') {
+                        // Timer is off (or a trigger) - skip the next scheduled run (#47)
+                        events.on.skip = true;
+                        if (events.off) events.off.skip = true;
+                        log(2, "Next '" + events.on.name + "' event cancelled");
+                    }
                 }
                 updateStatus();
             } else if (data === 'info') {
@@ -271,7 +316,8 @@ module.exports = function(RED) {
                         if (events.on.type == '9') return 'manual';
                         if (!events.on.moment) return 'error';
                         return events.on.moment.local().toDate()
-                    }()
+                    }(),
+                    cancelled: !!events.on.skip
                 };
                 ret.off = {
                     property: (events.off.propertytype || 'msg') + '.' + events.off.property,
@@ -293,7 +339,8 @@ module.exports = function(RED) {
                         if (events.on.type == '9') return 'manual';
                         if (!events.on.moment) return 'error';
                         return events.on.moment.toDate()
-                    }()
+                    }(),
+                    cancelled: !!events.on.skip
                 };
             }
             return ret;
@@ -386,9 +433,15 @@ module.exports = function(RED) {
             event.shape = shape;
             event.state = (eventName == 'on');
             event.last = { moment: null };
+            event.skip = false;
             event.callback = function() {
-                // Send the event
-                send(event);
+                // Send the event, unless it was cancelled
+                if (event.skip) {
+                    event.skip = false;
+                    log(2, "Skipped cancelled '" + event.name + "' event");
+                } else {
+                    send(event);
+                }
                 if (!isSuspended()) {
                     // Schedule the next event, if it's not a 'manual' timer
                     schedule(event, null, null);
@@ -541,9 +594,14 @@ module.exports = function(RED) {
                         return true;
                     }
 
-                    // See if we can roll back a day - the on-time has passed, but the off-time might not have.
-                    if (init && moment(event.moment).add(-1, 'days').isAfter(now)) {
-                        event.moment.add(-1, 'day');
+                    // On startup, check whether the previous 'on' (on a selected day) is still running -
+                    // i.e. the on-time has passed, but the off-time has not.
+                    if (init && event.inverse.moment) {
+                        const prevOn = moment(event.inverse.moment);
+                        let guard = 0;
+                        do { prevOn.subtract(1, 'day'); } while (!weekdays()[prevOn.isoWeekday() - 1] && ++guard < 7);
+                        const prevOff = moment(prevOn).add(secs, 'seconds');
+                        if (prevOff.isAfter(now)) event.moment = prevOff;
                     }
 
                     break;
@@ -575,8 +633,10 @@ module.exports = function(RED) {
                 event.moment.add(1, 'day');
             }
 
-            // Adjust weekday if not selected (and not manual)
-            while (!manual && !weekdays()[event.moment.isoWeekday() - 1]) {
+            // Adjust weekday if not selected (and not manual). The 'off' event is gated by the day of
+            // the 'on' event it ends rather than its own day, so runs crossing midnight onto an
+            // unselected day still turn off (#58).
+            while (!manual && !eventDayAllowed(event)) {
                 event.moment.add(1, 'day');
             }
 
@@ -590,6 +650,18 @@ module.exports = function(RED) {
             const delay = event.moment.diff(now);
             event.timeout = setTimeout(event.callback, delay);
             return true;
+        }
+
+        function eventDayAllowed(event) {
+            if (event !== events.off) return weekdays()[event.moment.isoWeekday() - 1];
+            // Duration is always relative to the 'on' event that started it
+            if (event.type == '3') return true;
+            const on = events.on;
+            if (!on || on.type == '9' || !on.moment) return true;
+            // Find the most recent 'on' time-of-day at or before this 'off' and check its weekday
+            const onRef = moment(event.moment).hour(on.moment.hour()).minute(on.moment.minute()).second(on.moment.second());
+            if (onRef.isAfter(event.moment)) onRef.subtract(1, 'day');
+            return weekdays()[onRef.isoWeekday() - 1];
         }
 
         function updateStatus() {
@@ -632,11 +704,14 @@ module.exports = function(RED) {
                 }
                 message.text += weekdays().indexOf(true) === -1 ? ' (no weekdays selected) ' : '';
             }
+            if (events.on.skip && !isSuspended()) message.text += ' (next run cancelled)';
             node.status(message);
         }
 
         function suspend() {
+            events.on.skip = false;
             if (events.off) {
+                events.off.skip = false;
                 if (config.sendEventsOnSuspend) send(events.off);
                 clearTimeout(events.off.timeout);
                 events.off.moment = null;
@@ -699,12 +774,14 @@ module.exports = function(RED) {
             callback(events.on, 'timetod', 'ontime', String);
             callback(events.on, 'value', 'triggervalue', String);
             callback(events.on, 'value', 'onvalue', String);
+            callback(events.on, 'timesun', 'onsun', String);
             callback(events.on, 'offset', 'onoffset', Number);
             callback(events.on, 'randomoffset', 'onrandomoffset', toBoolean);
             callback(events.off, 'type', 'offtype', String);
             callback(events.off, 'timetod', 'offtime', String);
             callback(events.off, 'duration', 'duration', String);
             callback(events.off, 'value', 'offvalue', String);
+            callback(events.off, 'timesun', 'offsun', String);
             callback(events.off, 'offset', 'offoffset', Number);
             callback(events.off, 'randomoffset', 'offrandomoffset', toBoolean);
             callback(config, 'tag', 'tag', String);
