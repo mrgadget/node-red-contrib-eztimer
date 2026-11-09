@@ -142,6 +142,19 @@ You can set the following:
 | `msg.payload.sun`             | Boolean: true enables the schedule on a Sunday, false disables it.                  |
 
 # Change Log
+## 1.2.8
+* Fixed `off` events being pushed to the next selected weekday, leaving runs that cross midnight onto an unselected day stuck on. [credit @victor-zorro](https://github.com/mrgadget/node-red-contrib-eztimer/issues/58)
+* Fixed restart mid-run with a duration `off` on weekday-restricted schedules not restoring the `on` state.
+* Fixed HA zones not loading in the editor until an eztimer node had been deployed. [credit @ElVit](https://github.com/mrgadget/node-red-contrib-eztimer/issues/51)
+* Added programmatic sun events: `onsun`/`offsun`, or a sun event name as `ontime`/`triggertime`/`offtime`. [credit @matt6575](https://github.com/mrgadget/node-red-contrib-eztimer/issues/48)
+* `cancel` now works for trigger timers, and when the timer is off it skips the next scheduled run. [credit @Christian-Me](https://github.com/mrgadget/node-red-contrib-eztimer/issues/47)
+* Fixed cancelling an active run with a duration `off`, which stopped later runs from turning off.
+* Events are re-scheduled when the system clock jumps (e.g. NTP sync after boot). [credit @razvanstanga](https://github.com/mrgadget/node-red-contrib-eztimer/issues/52)
+* Fixed `{"action": "..."}` object inputs, broken since 1.2.7.
+* Fixed re-send stopping permanently after suspend/resume.
+* Changing `offtime` while the timer is on now just moves the `off` event, rather than re-sending `on`.
+* Fixed programmatic `off*` properties throwing on trigger timers.
+
 ## 1.2.7
 * Fixed HA zones when Node-RED is running as an HA addon using 'ingress' (web root path issue).
 * Enabled HA zones to work with multiple servers.  [credit @zachowj](https://github.com/mrgadget/node-red-contrib-eztimer/issues/39)

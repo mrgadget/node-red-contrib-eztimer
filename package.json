@@ -1,6 +1,6 @@
 {
     "name": "node-red-contrib-eztimer",
-    "version": "1.2.7",
+    "version": "1.2.8",
     "description": "A simple-yet-flexible timer/scheduler for node-red",
     "main": "index.js",
     "keywords": [
