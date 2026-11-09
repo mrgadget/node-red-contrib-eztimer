@@ -97,7 +97,7 @@ You can wire inject nodes to the input of this node and send the following strin
 | `on`        | Triggers manual on mode and causes eztimer to emit the configured `on` event. Manual mode is reset when the next `on` or `off` time is reached |
 | `off`       | Triggers manual off mode and causes eztimer to emit the configured `off` event. Manual mode is reset when the next `on` or `off` time is reached |
 | `info`      | Eztimer emits an object containing the `on` and `off` (or `trigger`) times in UTC format. It also contains the state which is either `on` or `off` (for on/off type). |
-| `cancel`    | Cancels the current run (if any) of the timer (_without_ emitting an `off` event). |
+| `cancel`    | If the timer is currently `on`, cancels the current run (_without_ emitting an `off` event). Otherwise (or for a trigger), cancels the next scheduled `on`/trigger event and its matching `off`. A manual `on` clears a pending cancel. |
 | `sync`      | Re-sends the last emitted event |
 
 # Programmatic Control
@@ -119,14 +119,16 @@ You can set the following:
 | `msg.payload.tag`             | String value emitted as the `tag` property for all events                           |
 | `msg.payload.topic`           | String value emitted as the `topic` property for all events                         |
 | `msg.payload.ontype`          | Integer value: `Sun Event [1]` & `Time of Day [2]`                                  |
-| `msg.payload.ontime`          | String value representing time of day (HH:mm[:ss])                                  |
+| `msg.payload.ontime`          | String value representing time of day (HH:mm[:ss]), or a sun event name (e.g. `dusk`), which sets `onsun` and switches `ontype` to Sun Event unless `ontype` is also given |
+| `msg.payload.onsun`           | String value: sun event name (e.g. `sunrise`, `dusk`, `goldenHour`)                 |
 | `msg.payload.triggertime`     | Alias of `ontime`                                                                   |
 | `msg.payload.onvalue`         | Output value for on event (must be same as configured type)                         |
 | `msg.payload.triggervalue`    | Alias of `onvalue`                                                                  |
 | `msg.payload.onoffset`        | Number value as specified above for Offset configuration                            |
 | `msg.payload.onrandomoffset`  | Boolean value as specified above in Randomisation of Times                          |
 | `msg.payload.offtype`         | Integer value: `Sun Event [1]`, `Time of Day [2]` & `Duration [3]`                  |
-| `msg.payload.offtime`         | String value representing time of day (HH:mm[:ss])                                  |
+| `msg.payload.offtime`         | String value representing time of day (HH:mm[:ss]), or a sun event name (as `ontime`) |
+| `msg.payload.offsun`          | String value: sun event name (e.g. `sunset`, `night`)                               |
 | `msg.payload.duration`        | String value representing a timespan (see [Times](##Times))                         |
 | `msg.payload.offvalue`        | Output value for off event (must be same as configured type)                        |
 | `msg.payload.offoffset`       | Number value as specified above for Offset configuration                            |
