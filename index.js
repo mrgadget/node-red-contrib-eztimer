@@ -1,3 +1,5 @@
+const util = require('util');
+
 /* eslint-disable no-invalid-this,consistent-this */
 /**
  * The MIT License (MIT)
@@ -27,111 +29,160 @@ module.exports = function(RED) {
     const moment = require('moment');
     const SunCalc = require('suncalc');
     const _ = require('lodash');
-    const fmt = 'YYYY-MM-DD HH:mm';
+    const fmt = 'YYYY-MM-DD HH:mm:ss';
+    const sunTimes = [
+        "solarNoon",
+        "goldenHourEnd",
+        "goldenHour",
+        "sunriseEnd",
+        "sunsetStart",
+        "sunrise",
+        "sunset",
+        "dawn",
+        "dusk",
+        "nauticalDawn",
+        "nauticalDusk",
+        "nightEnd",
+        "night",
+        "nadir"
+    ];
 
-    RED.nodes.registerType('schedex', function(config) {
+    // Registered once at module load (not per node instance) so the editor can list HA zones
+    // before any eztimer node has been deployed (#51).
+    function getGlobalContext() {
+        let ctx = null;
+        RED.nodes.eachNode(function(cfg) {
+            if (ctx) return;
+            const n = RED.nodes.getNode(cfg.id);
+            if (n && typeof n.context === 'function') ctx = n.context().global;
+        });
+        return ctx;
+    }
+
+    RED.httpAdmin.get("/eztimer/getHaZones", RED.auth.needsPermission('serial.read'), function(req,res) {
+        const globalContext = getGlobalContext();
+        const ha = globalContext ? globalContext.get('homeassistant') : null;
+        let zones = [];
+
+        if (ha) {
+            const servers = Object.keys(ha);
+            const multipleServers = servers.length > 1;
+            for (const server of servers) {
+                if (!ha[server] || !ha[server].states) continue;
+                for (const element in ha[server].states) {
+                    const zone = ha[server].states[element];
+                    if (element.substring(0, 4) == "zone") {
+                        const z = {
+                            entity_id: zone.entity_id,
+                            name: multipleServers
+                                ? `${server}: ${zone.attributes.friendly_name}`
+                                : zone.attributes.friendly_name,
+                            latitude: zone.attributes.latitude,
+                            longitude: zone.attributes.longitude,
+                        };
+                        if (z.entity_id.substring(0, 9) == "zone.home") zones.unshift(z);
+                        else zones.push(z);
+                    }
+                }
+            }
+        }
+        res.json(zones);
+    });
+
+    RED.nodes.registerType('eztimer', function(config) {
         RED.nodes.createNode(this, config);
-        const node = this,
-            events = {
-                on: setupEvent('on', 'dot'),
-                off: setupEvent('off', 'ring')
-            };
-        events.on.inverse = events.off;
-        events.off.inverse = events.on;
+        const node = this
+        let events = {};
+        let state = false;
+        let resendInterval;
+        let resendObj;
+        let inputMsg = {};
 
-        // migration code : if new values are undefined, set all to true
-        if (
-            config.sun === undefined &&
-            config.mon === undefined &&
-            config.tue === undefined &&
-            config.wed === undefined &&
-            config.thu === undefined &&
-            config.fri === undefined &&
-            config.sat === undefined
-        ) {
-            const name = config.name || `${config.ontime} - ${config.offtime}`;
-            node.warn(
-                `Schedex [${name}]: New weekday configuration attributes are not defined, please edit the node. Defaulting to true.`
-            );
-            config.sun = config.mon = config.tue = config.wed = config.thu = config.fri = config.sat = true;
+        switch (config.timerType) {
+            case '1':
+                events.on = setupEvent('on', 'dot');
+                events.off = setupEvent('off', 'ring');
+                break;
+            case '2':
+                events.on = setupEvent('on', 'ring');
+                events.off = null;
+                break;
         }
 
-        const weekdays = [
-            config.mon,
-            config.tue,
-            config.wed,
-            config.thu,
-            config.fri,
-            config.sat,
-            config.sun
-        ];
+        if (events.on && events.off) {
+            events.on.inverse = events.off;
+            events.off.inverse = events.on;
+        }
+
+        // Init resend
+        if (config.resend) {
+            resendInterval = getSeconds(config.resendInterval);
+            if (resendInterval > 0) {
+                log(1, 'Re-send interval = ' + resendInterval + ' seconds.');
+            } else {
+                log(1, 'Re-send disabled.');
+            }
+        }
+
+        function startResend() {
+            clearTimeout(resendObj);
+            if (config.resend && resendInterval > 0) resend();
+        }
+
+        function resend() {
+            resendObj = setTimeout(function() {
+                if (events.last) send(events.last, true);
+                resend()
+            }, (resendInterval) * 1000);
+        }
+
+        function weekdays() {
+            return [
+                config.mon,
+                config.tue,
+                config.wed,
+                config.thu,
+                config.fri,
+                config.sat,
+                config.sun
+            ];
+        }
 
         node.on('input', function(msg) {
+            inputMsg = msg;
             let handled = false,
-                requiresBootstrap = false;
-            if (_.isString(msg.payload)) {
-                // TODO - with these payload options, we can't support on and ontime etc.
-                if (msg.payload === 'on') {
-                    handled = true;
-                    send(events.on, true);
-                } else if (msg.payload === 'off') {
-                    handled = true;
-                    send(events.off, true);
-                } else if (msg.payload === 'info') {
-                    handled = true;
-                    node.send({
-                        topic: 'info',
-                        payload: {
-                            on: isSuspended()
-                                ? 'suspended'
-                                : events.on.moment.toDate().toUTCString(),
-                            off: isSuspended()
-                                ? 'suspended'
-                                : events.off.moment.toDate().toUTCString(),
-                            state: isSuspended()
-                                ? 'suspended'
-                                : events.off.moment.isAfter(events.on.moment) ? 'off' : 'on',
-                            ontopic: events.on.topic,
-                            onpayload: events.on.payload,
-                            offtopic: events.off.topic,
-                            offpayload: events.off.payload
-                        }
-                    });
-                } else {
-                    if (msg.payload.indexOf('suspended') !== -1) {
-                        handled = true;
-                        const match = /.*suspended\s+(\S+)/.exec(msg.payload);
-                        const previous = config.suspended;
-                        config.suspended = toBoolean(match[1]);
-                        requiresBootstrap = requiresBootstrap || previous !== config.suspended;
-                    }
-                    enumerateProgrammables(function(obj, prop, payloadName, typeConverter) {
-                        const match = new RegExp(`.*${payloadName}\\s+(\\S+)`).exec(
-                            msg.payload
-                        );
-                        if (match) {
-                            handled = true;
-                            const previous = obj[prop];
-                            obj[prop] = typeConverter(match[1]);
-                            requiresBootstrap = requiresBootstrap || previous !== obj[prop];
-                        }
-                    });
-                }
+            requiresBootstrap = false;
+            if (msg.payload == null) {
+                // Unsuppored input
+                node.error("Null or undefined (msg.payload) input.")
+            } else if (_.isString(msg.payload)) {
+                handled = action('payload string', msg)
             } else {
+                msg.payload = normaliseSunTimes(msg.payload);
                 if (msg.payload.hasOwnProperty('suspended')) {
                     handled = true;
                     const previous = config.suspended;
                     config.suspended = !!msg.payload.suspended;
                     requiresBootstrap = requiresBootstrap || previous !== config.suspended;
                 }
+                if (msg.payload.hasOwnProperty('manual')) {
+                    handled = true;
+                    const previous = config.suspended;
+                    config.suspended = !!msg.payload.manual;
+                    requiresBootstrap = requiresBootstrap || previous !== config.suspended;
+                }
+                if (msg.payload.hasOwnProperty('action')) {
+                    handled = action('action', Object.assign({}, msg, { payload: msg.payload.action }));
+                }
                 enumerateProgrammables(function(obj, prop, payloadName, typeConverter) {
-                    if (msg.payload.hasOwnProperty(payloadName)) {
+                    if (obj && msg.payload.hasOwnProperty(payloadName)) {
                         handled = true;
                         const previous = obj[prop];
                         obj[prop] = typeConverter(msg.payload[payloadName]);
-                        requiresBootstrap = requiresBootstrap || previous !== obj[prop];
+                        requiresBootstrap = requiresBootstrap || (previous !== obj[prop] && dynamicDuration(payloadName, obj[prop]));
                     }
                 });
+                if (!handled) node.error("Invalid object (msg.payload) input.")
             }
             if (!handled) {
                 node.status({
@@ -144,7 +195,259 @@ module.exports = function(RED) {
             }
         });
 
+        // Allow sun events to be set programmatically (#48): a sun event name passed as
+        // ontime/triggertime/offtime is treated as onsun/offsun, and switches the event type to
+        // 'Sun Event' unless a type is given in the same message.
+        function normaliseSunTimes(payload) {
+            const p = Object.assign({}, payload);
+            [['ontime', 'on'], ['triggertime', 'on'], ['offtime', 'off']].forEach(function([timeKey, prefix]) {
+                if (typeof p[timeKey] === 'string' && sunTimes.indexOf(p[timeKey]) !== -1) {
+                    p[prefix + 'sun'] = p[timeKey];
+                    delete p[timeKey];
+                }
+            });
+            ['on', 'off'].forEach(function(prefix) {
+                if (p.hasOwnProperty(prefix + 'sun') && !p.hasOwnProperty(prefix + 'type')) p[prefix + 'type'] = '1';
+            });
+            return p;
+        }
+
+        function action(source, msg) {
+            const data = msg.payload
+            let handled = false;
+            if (data === 'on') {
+                // Sends the on event without impacting the scheduled event
+                handled = true;
+                // A manual 'on' overrides any pending cancel
+                events.on.skip = false;
+                if (events.off) events.off.skip = false;
+                send(events.on, true);
+                if (events.off && events.off.type == '3') schedule(events.off, null, true); // If 'off' is of type duration, schedule 'off' event.
+                updateStatus();
+            } else if (data === 'off' && config.timerType == '1') {
+                // Sends the off event, then re-schedules it
+                handled = true;
+                clearTimeout(events.off.timeout);
+                events.off.moment = null;
+                send(events.off, true);
+                if (!isSuspended() && events.off.type != '3') schedule(events.off);
+                updateStatus();
+            } else if (data === 'trigger') {
+                // Sends the trigger/on event without impact the scheduled event
+                handled = true;
+                send(events.on);
+                updateStatus();
+            } else if (data === 'cancel') {
+                handled = true;
+                if (!isSuspended()) {
+                    if (config.timerType == '1' && state) {
+                        // Timer is on - cancel the current run without sending the off event
+                        clearTimeout(events.off.timeout);
+                        state = false;
+                        events.off.moment = null;
+                        events.off.skip = false;
+                        schedule(events.on);
+                        // Re-schedule 'off' for all types - a duration 'off' is only ever scheduled
+                        // here or by its own callback, so leaving it unscheduled stopped it firing.
+                        if (events.off.type != '9') schedule(events.off);
+                    } else if (events.on.type != '9') {
+                        // Timer is off (or a trigger) - skip the next scheduled run (#47)
+                        events.on.skip = true;
+                        if (events.off) events.off.skip = true;
+                        log(2, "Next '" + events.on.name + "' event cancelled");
+                    }
+                }
+                updateStatus();
+            } else if (data === 'info') {
+                handled = true;
+                let info = getInfo();
+                // Info is now sent with every output - continue to send as payload for backward compatibiliy.
+                node.send({
+                    topic: 'info',
+                    info: info,
+                    tag: config.tag || 'eztimer',
+                    payload: info,
+                    _linkSource: msg._linkSource,
+                });
+            } else if (data === 'sync') {
+                handled = true;
+                sync();
+            } else {
+                // if (data.indexOf('suspended') !== -1) {
+                //     handled = true;
+                //     const match = /.*suspended\s+(\S+)/.exec(data);
+                //     const previous = config.suspended;
+                //     config.suspended = toBoolean(match[1]);
+                //     requiresBootstrap = requiresBootstrap || (previous !== config.suspended && config.sendEventsOnSuspend);
+                // }
+                // enumerateProgrammables(function(obj, prop, payloadName, typeConverter) {
+                //     const match = new RegExp(`.*${payloadName}\\s+(\\S+)`).exec(data);
+                //     if (match) {
+                //         handled = true;
+                //         const previous = obj[prop];
+                //         obj[prop] = typeConverter(match[1]);
+                //         requiresBootstrap = requiresBootstrap || (previous !== obj[prop] && dynamicDuration(prop, obj[prop]));
+                //     }
+                // });
+                switch (source) {
+                    case 'payload string':
+                        node.error("Invalid action input (via msg.payload string)");
+                        break;
+                    case 'action':
+                            node.error("Invalid action input (via msg.payload object action property)");
+                            break;
+                }
+            }
+            return handled;
+        }
+
+        function getInfo() {
+            let ret = {
+                name: node.name || 'eztimer',
+                state: function() {
+                    if (config.timerType == '2') return undefined; // Trigger
+                    if (isSuspended()) return 'suspended';
+                    if (state) { return 'on' } else { return 'off' }
+                }()
+            };
+            if (config.timerType == '1') {
+                // on/off timer type
+                ret.on = {
+                    property: (events.on.propertytype || 'msg') + '.' + events.on.property,
+                    value: getValue(events.on) || "<none>",
+                    nextEvent: function() {
+                        if (isSuspended()) return 'suspended';
+                        if (events.on.type == '9') return 'manual';
+                        if (!events.on.moment) return 'error';
+                        return events.on.moment.local().toDate()
+                    }(),
+                    cancelled: !!events.on.skip
+                };
+                ret.off = {
+                    property: (events.off.propertytype || 'msg') + '.' + events.off.property,
+                    value: getValue(events.off) || "<none>",
+                    nextEvent: function() {
+                        if (config.timerType == '2') return undefined; // Trigger
+                        if (isSuspended()) return 'suspended';
+                        if (!events.off.moment) return 'manual';
+                        return events.off.moment.toDate()
+                    }()
+                };
+            } else {
+                // trigger timer type
+                ret.trigger = {
+                    property: (events.on.propertytype || 'msg') + '.' + events.on.property,
+                    value: getValue(events.on) || "<none>",
+                    nextEvent: function() {
+                        if (isSuspended()) return 'suspended';
+                        if (events.on.type == '9') return 'manual';
+                        if (!events.on.moment) return 'error';
+                        return events.on.moment.toDate()
+                    }(),
+                    cancelled: !!events.on.skip
+                };
+            }
+            return ret;
+        }
+
+        function log(level, message) {
+            if (config.debug) level = Math.max(3, level); //Outputs everything in node warn or error.
+            switch (level) {
+                case 1: //verbose, ignore
+                    break;
+                case 2:
+                    node.log(message); // log to node console only
+                    break;
+                case 3:
+                    node.warn(message); // log to node debug window
+                    break;
+                default:
+                    node.error(message); //anything above 3.
+            }
+        }
+
+        function dynamicDuration(property, duration) {
+            // Return false if not a duration request
+            if (property == "offtime" && state) {
+                schedule(events.off, null, true);
+            } else if (property == "duration") {
+                if (state) {
+                    // Timer currently 'on' - parse time
+                    let secs = getSeconds(duration);
+                    let offTime = moment(events.on.last.moment).add(secs, 'seconds');
+
+                    if (offTime.isBefore(node.now())) {
+                        // New time is before now - need to turn off and schedule
+                        log(2, "Live duration change (" + duration + " => " + secs + "s) causes an off-time in the past, sending 'off' event.");
+                        send(events.off);
+                        schedule(events.off);
+                    } else {
+                        // New time is after now - just update the scheduled off event (and status)
+                        log(2, "Live duration change (" + duration + " => " + secs + "s), rescheduling 'off' time to " + offTime.toString());
+                        schedule(events.off, null, true);
+                    }
+                } else {
+                    // Timer currently 'off', just re-schedule of off event (if an on event is scheduled)
+                    if (!isSuspended()) {
+                        schedule(events.off);
+                    }
+                }
+            } else {
+                return true;
+            }
+
+            updateStatus();
+
+            // Return false to indicate no bootstrap required
+            return false;
+        }
+
+        function getSeconds(val) {
+            let secs = 0;
+
+            // accept 00:00, 00:00:00, 45s, 45h,4m etc.
+            let matches = new RegExp(/(?:(\d+)[h:\s,]+)?(?:(\d+)[m:\s,]+)?(?:(\d+)[s\s]*)?$/).exec(val);
+            if (matches.length > 1) {
+                if (matches[1] != null) {
+                    secs += parseInt(matches[1]) * 3600; // hours
+                }
+                if (matches[2] != null) {
+                    secs += parseInt(matches[2]) * 60; // minutes
+                }
+                if (matches[3] != null) {
+                    secs += parseInt(matches[3]) * 1; // seconds
+                }
+            } else {
+                return 0;
+            }
+
+            return secs;
+        }
+
         node.on('close', suspend);
+
+        // Detect system clock jumps (e.g. NTP syncing after boot, VM resume, manual change) (#52).
+        // setTimeout runs on a monotonic clock, so events scheduled before a wall-clock jump would
+        // fire at the wrong wall-clock time. Compare wall-clock vs monotonic elapsed time and
+        // re-bootstrap if they diverge. Event-loop lag affects both equally, so it won't trigger this.
+        const clockCheckMs = 10000;
+        const clockJumpThresholdMs = 5000;
+        function monotonicMs() {
+            const t = process.hrtime();
+            return t[0] * 1e3 + t[1] / 1e6;
+        }
+        let clockOffset = Date.now() - monotonicMs();
+        const clockCheck = setInterval(function() {
+            const offset = Date.now() - monotonicMs();
+            const jump = offset - clockOffset;
+            clockOffset = offset;
+            if (Math.abs(jump) > clockJumpThresholdMs) {
+                if (isSuspended()) return;
+                log(2, 'System time change of ' + Math.round(jump / 1000) + 's detected, re-scheduling events.');
+                bootstrap();
+            }
+        }, clockCheckMs);
+        node.on('close', function() { clearInterval(clockCheck); });
 
         function setupEvent(eventName, shape) {
             const filtered = _.pickBy(config, function(value, key) {
@@ -155,55 +458,194 @@ module.exports = function(RED) {
             });
             event.name = eventName.toUpperCase();
             event.shape = shape;
+            event.state = (eventName == 'on');
+            event.last = { moment: null };
+            event.skip = false;
             event.callback = function() {
-                send(event);
-                schedule(event);
+                // Send the event, unless it was cancelled
+                if (event.skip) {
+                    event.skip = false;
+                    log(2, "Skipped cancelled '" + event.name + "' event");
+                } else {
+                    send(event);
+                }
+                if (!isSuspended()) {
+                    // Schedule the next event, if it's not a 'manual' timer
+                    schedule(event, null, null);
+                } else {
+                    // Else just clear the event - we don't know when the off event will be
+                    event.moment = undefined;
+                }
+                // Update the status/icon
+                updateStatus();
             };
             return event;
         }
 
-        function send(event, manual) {
-            node.send({
-                topic: event.topic,
-                payload: event.payload
-            });
-            node.status({
-                fill: manual ? 'blue' : 'green',
-                shape: event.shape,
-                text:
-                    event.name +
-                    (manual ? ' manual' : ' auto') +
-                    (isSuspended()
-                        ? ' - scheduling suspended'
-                        : ` until ${event.inverse.moment.format(fmt)}`)
-            });
+        function getValue(event) {
+            // Parse value to selected format
+            let tgtValue = event.value;
+            switch (event.valuetype) {
+                case 'flow':
+                    tgtValue = node.context().flow.get(tgtValue);
+                    break;
+                case 'global':
+                    tgtValue = node.context().global.get(tgtValue);
+                    break;
+                case 'json':
+                    tgtValue = JSON.parse(tgtValue);
+                    break;
+                case 'bool':
+                    tgtValue = (tgtValue == "true");
+                    break;
+                case 'date':
+                    tgtValue = (new Date()).getTime();
+                    break;
+                case 'num':
+                    tgtValue = parseFloat(tgtValue);
+                    break;
+            }
+            return tgtValue;
         }
 
-        function schedule(event, isInitial) {
-            const now = node.now();
-            const matches = new RegExp(/(\d+):(\d+)/).exec(event.time);
-            if (matches && matches.length) {
-                // Don't use existing 'now' moment here as hour and minute mutate the moment.
-                event.moment = node
-                    .now()
-                    .hour(+matches[1])
-                    .minute(+matches[2]);
-            } else {
-                const sunCalcTimes = SunCalc.getTimes(new Date(), config.lat, config.lon);
-                const date = sunCalcTimes[event.time];
-                if (date) {
-                    event.moment = moment(date);
+        function sync() {
+            if (events.last) send(events.last);
+        }
+
+        function send(event, manual) {
+            if (!event.suppressrepeats || state != event.state) {
+                log(1, 'emitting \'' + event.name + '\' event');
+                event.last.moment = node.now();
+                events.last = event;
+    
+                // Output value
+                switch (event.propertytype || 'msg') {
+                    case "flow":
+                        node.context().flow.set(event.property, getValue(event));
+                        break;
+                    case "global":
+                        node.context().global.set(event.property, getValue(event));
+                        break;
+                    case "msg":
+                        let msg = {};
+                        msg.info = getInfo();
+                        msg.tag = config.tag || 'eztimer';
+                        msg.topic = config.topic || '';
+                        let currPart = msg;
+                        let spl = event.property.split('.');
+                        for (let i in spl) {
+                            if (i < (spl.length - 1)) {
+                            if (!currPart[spl[i]]) currPart[spl[i]] = {};
+                                currPart = currPart[spl[i]];
+                            } else {
+                                currPart[spl[i]] = getValue(event);
+                            }
+                        }
+                        msg._payload = inputMsg.payload;
+                        node.send(msg);
+                    break;
                 }
             }
+
+            state = event.state;
+        }
+
+
+        function schedule(event, init, manual) {
+            let now = node.now();
+
+            switch (event.type) {
+                case '1': //Sun
+                    event.typeName = 'sun';
+                    let nextDate = new Date();
+                    // Get tomorrow's sun data
+                    if (!init) nextDate = nextDate.setDate(nextDate.getDate() + 1);
+                    const sunCalcTimes = SunCalc.getTimes(nextDate, config.lat, config.lon);
+                    // Get first event - move closer to noon if required.
+                    let t = sunTimes.indexOf(event.timesun);
+                    while (!moment(sunCalcTimes[sunTimes[t]]).isValid()) t = Math.max(t - 2, 0);
+                    // If we've had to move closer to noon, emit a warning
+                    if (event.timesun != sunTimes[t]) {
+                        log(4, { "message": 'Sun event (' + event.timesun + ') invalid for chosen lat/long (due to polar proximity). Sun event \'' + sunTimes[t] + '\' has been chosen as the closest valid candidate.', "events": sunCalcTimes});
+                    }
+                    // Use determined event time
+                    let date = sunCalcTimes[sunTimes[t]];
+                    if (date && moment(date).isValid()) {
+                        event.moment = moment(date);
+                    } else {
+                        event.error = 'Unable to determine time for \'' + event.timesun + '\'';
+                    }
+
+                    break;
+                case '2': //Time of Day
+                    if (event.timetod == '') {
+                        event.moment = null;
+                        return true;
+                    }
+                    event.typeName = 'time of day';
+                    let m = node.now().millisecond(0);
+                    let re = new RegExp(/\d+/g);
+                    let p1, p2, p3;
+                    p1 = re.exec(event.timetod);
+                    if (p1) p2 = re.exec(event.timetod);
+                    if (p2) p3 = re.exec(event.timetod);
+
+                    if (p3) {
+                        m.hour(+p1[0]).minute(+p2[0]).second(+p3[0]);
+                    } else if (p2) {
+                        m.hour(+p1[0]).minute(+p2[0]).second(0);
+                    } else {
+                        m = null;
+                    }
+                    if (m) {
+                        event.moment = m;
+                        // If a standard run, add a day
+                        if (!init && !m.isAfter(now)) event.moment = event.moment.add(1, 'days');
+                    } else {
+                        event.moment = null;
+                    }
+
+                    break;
+                case '3': //Duration
+                    event.typeName = 'duration';
+                    let secs = getSeconds(event.duration);
+
+                    if (manual && event.inverse.last.moment) {
+                        //event is manual - schedule based on last 'on' event
+                        event.moment = moment(event.inverse.last.moment).add(secs, 'seconds');
+                    } else if (event.inverse.moment) {
+                        // event is auto - schedule based on current 'on' event
+                        event.moment = moment(event.inverse.moment).add(secs, 'seconds');
+                    } else {
+                        event.moment = null;
+                        return true;
+                    }
+
+                    // On startup, check whether the previous 'on' (on a selected day) is still running -
+                    // i.e. the on-time has passed, but the off-time has not.
+                    if (init && event.inverse.moment) {
+                        const prevOn = moment(event.inverse.moment);
+                        let guard = 0;
+                        do { prevOn.subtract(1, 'day'); } while (!weekdays()[prevOn.isoWeekday() - 1] && ++guard < 7);
+                        const prevOff = moment(prevOn).add(secs, 'seconds');
+                        if (prevOff.isAfter(now)) event.moment = prevOff;
+                    }
+
+                    break;
+                case '9': //Manual
+                    event.typeName = 'manual';
+                    event.moment = null;
+                    return true;
+            }
+
             if (!event.moment) {
                 node.status({
                     fill: 'red',
                     shape: 'dot',
-                    text: `Invalid time: ${event.time}`
+                    text: event.error ? event.error : `Invalid time: ${event.timetod}`
                 });
                 return false;
             }
-            event.moment.seconds(0);
 
             if (event.offset) {
                 let adjustment = event.offset;
@@ -213,51 +655,105 @@ module.exports = function(RED) {
                 event.moment.add(adjustment, 'minutes');
             }
 
-            if (!isInitial || (isInitial && now.isAfter(event.moment))) {
+            // Add a day if the moment is in the past
+            if (now.isAfter(event.moment)) {
                 event.moment.add(1, 'day');
             }
 
-            // Adjust weekday if not selected
-            while (!weekdays[event.moment.isoWeekday() - 1]) {
+            // Adjust weekday if not selected (and not manual). The 'off' event is gated by the day of
+            // the 'on' event it ends rather than its own day, so runs crossing midnight onto an
+            // unselected day still turn off (#58).
+            while (!manual && !eventDayAllowed(event)) {
                 event.moment.add(1, 'day');
             }
 
-            if (event.timeout) {
-                clearTimeout(event.timeout);
-            }
+            // Log event
+            log(1, "Scheduled '" + event.name + "' (" + event.typeName + ") for " + event.moment.toString());
+
+            // Clear any pending event
+            if (event.timeout) clearTimeout(event.timeout);
+
+            //console.log('schedule: ' + event.name + ' => ' + event.moment.toString());
             const delay = event.moment.diff(now);
             event.timeout = setTimeout(event.callback, delay);
             return true;
         }
 
+        function eventDayAllowed(event) {
+            if (event !== events.off) return weekdays()[event.moment.isoWeekday() - 1];
+            // Duration is always relative to the 'on' event that started it
+            if (event.type == '3') return true;
+            const on = events.on;
+            if (!on || on.type == '9' || !on.moment) return true;
+            // Find the most recent 'on' time-of-day at or before this 'off' and check its weekday
+            const onRef = moment(event.moment).hour(on.moment.hour()).minute(on.moment.minute()).second(on.moment.second());
+            if (onRef.isAfter(event.moment)) onRef.subtract(1, 'day');
+            return weekdays()[onRef.isoWeekday() - 1];
+        }
+
+        function updateStatus() {
+            let message = null;
+
+            // Determine the next event
+            let nextEvent = null;
+            switch (config.timerType) {
+                case "1": // on/off
+                    if (state) {
+                        if (events.off && events.off.moment) nextEvent = events.off;
+                    } else {
+                        if (events.on.moment) nextEvent = events.on;
+                    }
+                    message = {
+                        fill: 'green',
+                        shape: state ? 'dot' : 'ring',
+                        text: state ? events.on.name : events.off.name
+                    };
+                    if (nextEvent) message.text += ` until ${nextEvent.moment.format(fmt)}`;
+                    break;
+                case "2": // trigger
+                    if (events.on.moment) nextEvent = events.on;
+                    message = {
+                        fill: 'green',
+                        shape: 'ring',
+                        text: ''
+                    };
+                    if (nextEvent) message.text = `trigger @ ${nextEvent.moment.format(fmt)}`;
+                    break;
+            }
+
+            if (!nextEvent) {
+                if (isSuspended()) {
+                    if (!state) message.fill = 'grey';
+                    message.shape = 'dot';
+                    message.text = 'scheduling suspended';
+                } else {
+                    message.text += ', no scheduled event';
+                }
+                message.text += weekdays().indexOf(true) === -1 ? ' (no weekdays selected) ' : '';
+            }
+            if (events.on.skip && !isSuspended()) message.text += ' (next run cancelled)';
+            node.status(message);
+        }
+
         function suspend() {
+            events.on.skip = false;
+            if (events.off) {
+                events.off.skip = false;
+                if (config.sendEventsOnSuspend) send(events.off);
+                clearTimeout(events.off.timeout);
+                events.off.moment = null;
+            }
+
             clearTimeout(events.on.timeout);
+            clearTimeout(resendObj);
             events.on.moment = null;
-            clearTimeout(events.off.timeout);
-            events.off.moment = null;
-            node.status({
-                fill: 'grey',
-                shape: 'dot',
-                text: `Scheduling suspended ${
-                    weekdays.indexOf(true) === -1 ? '(no weekdays selected) ' : ''
-                } - manual mode only`
-            });
+
+            updateStatus();
         }
 
         function resume() {
-            if (schedule(events.on, true) && schedule(events.off, true)) {
-                const firstEvent = events.on.moment.isBefore(events.off.moment)
-                    ? events.on
-                    : events.off;
-                const message = `${firstEvent.name} ${firstEvent.moment.format(fmt)}, ${
-                    firstEvent.inverse.name
-                } ${firstEvent.inverse.moment.format(fmt)}`;
-                node.status({
-                    fill: 'yellow',
-                    shape: 'dot',
-                    text: message
-                });
-            }
+            let on = events.on.type != '9' && schedule(events.on, true);
+            let off = (!events.off || (events.off && events.off.type != '9' && schedule(events.off, true)));
         }
 
         function bootstrap() {
@@ -265,24 +761,59 @@ module.exports = function(RED) {
                 suspend();
             } else {
                 resume();
+                startResend();
+
+                // Wait 500ms for startup, then fire PREVIOUS event to ensure we're in the right state.
+                setTimeout(function() {
+                    if (events.on && events.on.moment && events.off && events.off.moment) {
+                        if (events.off.moment.isAfter(events.on.moment)) {
+                            //Next event is ON, send OFF
+                            if (config.startupMessage && config.startupMessage == true) {
+                                send(events.off);
+                            } else {
+                                state = false;
+                            }
+                        } else {
+                            //Next event is OFF, send ON
+                            if (config.startupMessage && config.startupMessage == true) {
+                                send(events.on);
+                            } else {
+                                state = true;
+                            }
+                        }
+                    } else if (events.on && (!events.off || events.off.type == '9')) {
+                        //Trigger
+                        if (config.startupMessage && config.startupMessage == true) {
+                            send(events.on);
+                        }
+                    }
+                    updateStatus();
+                }, 500);
             }
         }
 
         function isSuspended() {
-            return config.suspended || weekdays.indexOf(true) === -1;
+            return config.suspended || weekdays().indexOf(true) === -1;
         }
 
         function enumerateProgrammables(callback) {
-            callback(events.on, 'time', 'ontime', String);
-            callback(events.on, 'topic', 'ontopic', String);
-            callback(events.on, 'payload', 'onpayload', String);
+            callback(events.on, 'type', 'ontype', String);
+            callback(events.on, 'timetod', 'triggertime', String);
+            callback(events.on, 'timetod', 'ontime', String);
+            callback(events.on, 'value', 'triggervalue', String);
+            callback(events.on, 'value', 'onvalue', String);
+            callback(events.on, 'timesun', 'onsun', String);
             callback(events.on, 'offset', 'onoffset', Number);
             callback(events.on, 'randomoffset', 'onrandomoffset', toBoolean);
-            callback(events.off, 'time', 'offtime', String);
-            callback(events.off, 'topic', 'offtopic', String);
-            callback(events.off, 'payload', 'offpayload', String);
+            callback(events.off, 'type', 'offtype', String);
+            callback(events.off, 'timetod', 'offtime', String);
+            callback(events.off, 'duration', 'duration', String);
+            callback(events.off, 'value', 'offvalue', String);
+            callback(events.off, 'timesun', 'offsun', String);
             callback(events.off, 'offset', 'offoffset', Number);
             callback(events.off, 'randomoffset', 'offrandomoffset', toBoolean);
+            callback(config, 'tag', 'tag', String);
+            callback(config, 'topic', 'topic', String);
             callback(config, 'mon', 'mon', toBoolean);
             callback(config, 'tue', 'tue', toBoolean);
             callback(config, 'wed', 'wed', toBoolean);
@@ -300,10 +831,11 @@ module.exports = function(RED) {
         }
 
         // Bodges to allow testing
-        node.schedexEvents = () => events;
-        node.schedexConfig = () => config;
+        node.eztimerEvents = () => events;
+        node.eztimerConfig = () => config;
         node.now = moment;
 
         bootstrap();
     });
 };
+

@@ -1,21 +1,27 @@
 {
-    "name": "node-red-contrib-schedex",
-    "version": "1.2.1",
-    "description": "",
+    "name": "node-red-contrib-eztimer",
+    "version": "1.2.8",
+    "description": "A simple-yet-flexible timer/scheduler for node-red",
     "main": "index.js",
-    "keywords": ["node-red", "schedule", "scheduler", "timer", "sun events"],
+    "keywords": [
+        "node-red",
+        "schedule",
+        "scheduler",
+        "timer",
+        "sun events"
+    ],
     "scripts": {
         "test": "nyc --reporter=html node_modules/.bin/mocha -R spec ./tests/test.js",
         "readme2html": "node_modules/.bin/markdown README.md -f gfm"
     },
-    "author": "@biddster",
+    "author": "@bennuttall",
     "license": "MIT",
     "repository": {
         "type": "git",
-        "url": "https://github.com/biddster/node-red-contrib-schedex.git"
+        "url": "https://github.com/mrgadget/node-red-contrib-eztimer.git"
     },
     "bugs": {
-        "url": "https://github.com/biddster/node-red-contrib-schedex/issues"
+        "url": "https://github.com/mrgadget/node-red-contrib-eztimer/issues"
     },
     "dependencies": {
         "lodash": "^4.17.10",
@@ -25,7 +31,6 @@
     "devDependencies": {
         "chai": "^4.1.2",
         "eslint": "^4.19.1",
-        "eslint-config-biddster": "^0.6.0",
         "eslint-config-prettier": "^2.9.0",
         "markdown-to-html": "0.0.13",
         "mocha": "^5.1.1",
@@ -36,16 +41,8 @@
     },
     "node-red": {
         "nodes": {
-            "schedex": "index.js"
+            "eztimer": "index.js"
         }
-    },
-    "eslintConfig": {
-        "env": {
-            "es6": true,
-            "node": true,
-            "mocha": true
-        },
-        "extends": ["eslint-config-biddster/es6-node", "prettier"]
     },
     "prettier": {
         "singleQuote": true,

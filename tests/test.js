@@ -30,11 +30,11 @@ const moment = require('moment');
 const mock = require('node-red-contrib-mock-node');
 const nodeRedModule = require('../index.js');
 
-describe('schedex', function() {
+describe('eztimer', function() {
     it('should schedule initially', function() {
         const node = newNode();
-        assert.strictEqual(node.schedexEvents().on.time, '11:45');
-        assert.strictEqual(node.schedexEvents().off.time, 'dawn');
+        assert.strictEqual(node.eztimerEvents().on.time, '11:45');
+        assert.strictEqual(node.eztimerEvents().off.time, 'dawn');
 
         node.emit('input', {
             payload: 'on'
@@ -53,51 +53,51 @@ describe('schedex', function() {
         node.emit('input', {
             payload: 'ontime 11:12'
         });
-        assert.strictEqual(node.schedexEvents().on.time, '11:12');
+        assert.strictEqual(node.eztimerEvents().on.time, '11:12');
 
         node.emit('input', {
             payload: {
                 ontime: '23:12'
             }
         });
-        assert.strictEqual(node.schedexEvents().on.time, '23:12');
+        assert.strictEqual(node.eztimerEvents().on.time, '23:12');
 
         node.emit('input', {
             payload: 'offtime 10:12'
         });
-        assert.strictEqual(node.schedexEvents().off.time, '10:12');
+        assert.strictEqual(node.eztimerEvents().off.time, '10:12');
 
         node.emit('input', {
             payload: {
                 offtime: '22:12'
             }
         });
-        assert.strictEqual(node.schedexEvents().off.time, '22:12');
+        assert.strictEqual(node.eztimerEvents().off.time, '22:12');
 
         node.emit('input', {
             payload: 'mon true'
         });
-        assert.strictEqual(node.schedexConfig().mon, true);
+        assert.strictEqual(node.eztimerConfig().mon, true);
 
         node.emit('input', {
             payload: 'mon false'
         });
-        assert.strictEqual(node.schedexConfig().mon, false);
+        assert.strictEqual(node.eztimerConfig().mon, false);
 
         node.emit('input', {
             payload: { mon: true }
         });
-        assert.strictEqual(node.schedexConfig().mon, true);
+        assert.strictEqual(node.eztimerConfig().mon, true);
 
         node.emit('input', {
             payload: { lat: -1.1 }
         });
-        assert.strictEqual(node.schedexConfig().lat, -1.1);
+        assert.strictEqual(node.eztimerConfig().lat, -1.1);
 
         node.emit('input', {
             payload: 'lat -99.9'
         });
-        assert.strictEqual(node.schedexConfig().lat, -99.9);
+        assert.strictEqual(node.eztimerConfig().lat, -99.9);
     });
     it('should indicate bad programmatic input', function() {
         const node = newNode();
@@ -163,7 +163,7 @@ describe('schedex', function() {
             .format('HH:mm');
         const node = newNode(config);
         assert.strictEqual(
-            node.schedexEvents().on.moment.isoWeekday(),
+            node.eztimerEvents().on.moment.isoWeekday(),
             now.add(1, 'day').isoWeekday()
         );
     });
@@ -275,7 +275,7 @@ describe('schedex', function() {
                 suspended: false
             }
         });
-        const events = node.schedexEvents();
+        const events = node.eztimerEvents();
         console.log(now.toString());
         console.log(events.on.moment.toString());
         const duration = Math.round(moment.duration(events.on.moment.diff(now)).asMinutes());
@@ -294,7 +294,7 @@ describe('schedex', function() {
             ontime,
             onoffset: 60
         });
-        const events = node.schedexEvents();
+        const events = node.eztimerEvents();
         console.log(`ontime: ${events.on.moment.toString()}`);
         const duration = moment.duration(events.on.moment.diff(now)).asMinutes();
         console.log(duration);

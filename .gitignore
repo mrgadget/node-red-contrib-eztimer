@@ -6,5 +6,6 @@ node_modules
 
 .history
 .vscode
+.vs
 coverage
 .nyc_output
